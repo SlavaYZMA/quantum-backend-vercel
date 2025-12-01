@@ -1,5 +1,5 @@
 fastapi
-uvicorn
-requests
+uvicorn[standard]
 sentence-transformers
-scikit-learn
+torch --index-url https://download.pytorch.org/whl/cpu
+requests
