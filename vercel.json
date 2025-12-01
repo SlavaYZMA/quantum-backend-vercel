@@ -3,7 +3,7 @@
   "builds": [
     {
       "src": "api/ontology.py",
-      "use": "@vercel/python@3.12.0"
+      "use": "@vercel/python"
     }
   ],
   "routes": [
