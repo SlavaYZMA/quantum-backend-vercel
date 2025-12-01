@@ -1,88 +1,99 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-import requests
+# api/ontology.py
+import os
 import json
-import re
+import requests
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
-from collections import Counter
+import torch
+from typing import List, Dict
 
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Загружаем словарь
-with open("vocab_id.json", "r", encoding="utf-8") as f:
-    VOCAB = json.load(f)
-
+# Загружаем модель один раз при старте (холодный старт ~4–6 сек, потом мгновенно)
 model = SentenceTransformer('intfloat/multilingual-e5-large')
 
-@app.post("/ontology")
-async def ontology(request: dict):
-    username = request.get("username", "").lstrip("@")
-    if not username:
-        return {"error": "нет username"}
+# Загружаем твой словарь идентичностей
+with open("vocab_id.json", encoding="utf-8") as f:
+    VOCAB = json.load(f)
 
-    # Apify
+# Предвычисляем прототипы один раз при запуске
+prototypes = {}
+prototype_vectors = {}
+
+for item in VOCAB:
+    name = item["name_ru"]
+    phrases = item["phrases_ru"] + item["phrases_en"]
+    if phrases:
+        vectors = model.encode(phrases, normalize_embeddings=True, show_progress_bar=False)
+        prototype_vectors[name] = torch.mean(vectors, dim=0)
+        prototypes[name] = item
+
+class Request(BaseModel):
+    username: str
+
+def cosine_sim(a, b):
+    return float(torch.dot(a, b) / (torch.norm(a) * torch.norm(b) + 1e-8))
+
+@app.post("/api/ontology")
+async def get_ontology(req: Request):
+    username = req.username.lstrip("@")
+    
+    # 1. Получаем данные из Apify (твой токен храним в Vercel Environment Variables)
+    APIFY_TOKEN = os.environ.get("APIFY_TOKEN")
+    if not APIFY_TOKEN:
+        raise HTTPException(500, "APIFY_TOKEN не задан")
+
     resp = requests.post(
         "https://api.apify.com/v2/acts/apify~instagram-profile-scraper/run-sync-get-dataset-items",
-        params={"token": "apify_api_XFk4W4rmvDDfnSxhsYzkUbHnHPdJ0R1I2wyz"},
-        json={"usernames": [username], "resultsLimit": 50},
-        timeout=60
+        params={"token": APIFY_TOKEN},
+        json={"usernames": [username], "resultsLimit": 60},
+        timeout=90
     )
-    profile_data = resp.json()
+    
+    if resp.status_code != 200 or not resp.json():
+        raise HTTPException(404, "Профиль не найден или приватный")
 
-    if not profile_data or not profile_data[0]:
-        return {"error": "приватный профиль"}
-
-    profile = profile_data[0]
+    data = resp.json()[0]
     texts = []
-    if profile.get("biography"):
-        texts.append(profile["biography"])
-    for post in profile.get("latestPosts", [])[:40]:
-        if post.get("caption"):
-            texts.append(post["caption"])
+    if data.get("biography"):
+        texts.append(data["biography"])
+    for post in data.get("latestPosts", [])[:50]:
+        if caption := post.get("caption"):
+            texts.append(caption)
 
     if len(texts) < 3:
-        return {"error": "мало текстов"}
+        raise HTTPException(400, "Слишком мало текстов")
 
-    post_vectors = model.encode(texts)
+    # 2. Векторизуем все посты пользователя
+    post_vectors = model.encode(texts, normalize_embeddings=True, convert_to_tensor=True)
 
-    prototypes = []
-    for item in VOCAB:
-        phrases = item.get("phrases_ru", []) + item.get("phrases_en", [])
-        if phrases:
-            proto_vec = model.encode(phrases).mean(axis=0)
-            prototypes.append({"name": item["name_ru"], "vector": proto_vec})
-
-    results = []
+    # 3. Считаем близость к каждому прототипу
+    scores = {name: 0.0 for name in prototypes}
     for vec in post_vectors:
-        scores = []
-        for proto in prototypes:
-            sim = cosine_similarity([vec], [proto["vector"]])[0][0]
-            if sim > 0.55:
-                scores.append({"name": proto["name"], "score": float(sim)})
-        if scores:
-            best = max(scores, key=lambda x: x["score"])
-            results.append(best["name"])
+        for name, proto_vec in prototype_vectors.items():
+            scores[name] += cosine_sim(vec, proto_vec)
+    
+    total_posts = len(texts)
+    results = []
+    for name, score_sum in scores.items():
+        percent = round(score_sum / total_posts * 100, 1)
+        if percent > 1:  # отсекаем шум
+            proto = prototypes[name]
+            results.append({
+                "name": name,
+                "percent": percent,
+                "valence": proto.get("valence", ""),
+                "core_fear": proto.get("core_fear", ""),
+                "core_desire": proto.get("core_desire", ""),
+                "description": proto["description"]
+            })
 
-    if not results:
-        return {"clusters": [{"name": "неопределённая идентичность", "weight": 100.0}]}
+    # Сортируем по убыванию
+    results.sort(key=lambda x: x["percent"], reverse=True)
 
-    count = Counter(results)
-    total = len(results)
-    clusters = []
-    for name, cnt in count.most_common():
-        clusters.append({"name": name, "weight": round(cnt / total * 100, 1)})
-
-    return {"username": username, "clusters": clusters, "total_posts": len(texts)}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    return {
+        "username": username,
+        "total_posts_analyzed": total_posts,
+        "identities": results[:10]  # топ-10 самых сильных
+    }
