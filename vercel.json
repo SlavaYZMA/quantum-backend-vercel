@@ -1,10 +1,14 @@
 {
-  "version": 2,
-  "functions": {
-    "api/ontology.py": {
-      "runtime": "vercel/python@3.12"
+  "builds": [
+    {
+      "src": "api/**.py",
+      "use": "@vercel/python"
     }
-  },
-  "buildCommand": "pip install -r requirements.txt",
-  "installCommand": "pip install -r requirements.txt"
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/$1"
+    }
+  ]
 }
