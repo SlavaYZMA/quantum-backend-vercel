@@ -1,14 +1,15 @@
 {
+  "version": 2,
   "builds": [
     {
-      "src": "api/**.py",
-      "use": "@vercel/python"
+      "src": "api/ontology.py",
+      "use": "@vercel/python@3.12.0"
     }
   ],
   "routes": [
     {
-      "src": "/api/(.*)",
-      "dest": "/api/$1"
+      "src": "/api/ontology",
+      "dest": "api/ontology.py"
     }
   ]
 }
