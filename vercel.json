@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/ontology.py": {
+      "runtime": "python3.12"
+    }
+  }
+}
